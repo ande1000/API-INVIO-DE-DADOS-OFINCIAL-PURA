@@ -3,21 +3,20 @@ const http = require('http');
 const { Server } = require('socket.io');
 const Database = require('better-sqlite3');
 const path = require('path');
-const cors = require('cors'); // <-- IMPORTANTE
+const cors = require('cors');
 
 const app = express();
-app.use(cors()); // <-- ISSO LIBERA O ACESSO DE QUALQUER LUGAR
+app.use(cors());
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
 const server = http.createServer(app);
-const io = new Server(server, {
-  cors: { origin: '*' },
-});
+const io = new Server(server, { cors: { origin: '*' } });
 
-// Configuração do Banco de Dados
-const dbPath = process.env.DB_PATH || path.join(__dirname, 'messages.db');
+// CORREÇÃO CRÍTICA: Usar /tmp para o banco de dados no Render
+const dbPath = process.env.DB_PATH || path.join('/tmp', 'messages.db');
 const db = new Database(dbPath);
+
 db.exec(`
   CREATE TABLE IF NOT EXISTS messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -63,16 +62,13 @@ io.on('connection', (socket) => {
   socket.on('register', (username) => {
     currentUser = username;
     onlineUsers.set(username, socket.id);
-    console.log(`[online] ${username}`);
     const pending = getPending.all(username);
     pending.forEach((msg) => { socket.emit('message', msg); markDelivered.run(msg.id); });
   });
   socket.on('sendMessage', ({ from, to, content }) => {
     if (from && to && content) deliverMessage(from, to, content);
   });
-  socket.on('disconnect', () => {
-    if (currentUser) { onlineUsers.delete(currentUser); console.log(`[offline] ${currentUser}`); }
-  });
+  socket.on('disconnect', () => { if (currentUser) onlineUsers.delete(currentUser); });
 });
 
 // ROTAS DE USUÁRIO
@@ -90,7 +86,10 @@ app.post('/users', (req, res) => {
     `);
     stmt.run(username, password, fullName, maritalStatus, address, description, sign, age, photo);
     res.status(200).json({ message: 'Perfil salvo!' });
-  } catch (error) { res.status(500).json({ error: error.message }); }
+  } catch (error) { 
+    console.error('Erro no banco:', error);
+    res.status(500).json({ error: error.message }); 
+  }
 });
 
 app.post('/login', (req, res) => {
