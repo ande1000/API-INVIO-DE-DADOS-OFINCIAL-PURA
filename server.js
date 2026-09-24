@@ -8,16 +8,22 @@ const app = express();
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
+// Configuração de CORS para permitir acesso de qualquer lugar
+app.use((req, res, next) => {
+  res.header("Access-Control-Allow-Origin", "*");
+  res.header("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept");
+  res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  next();
+});
+
 const server = http.createServer(app);
 const io = new Server(server, {
-  cors: { origin: '*' }, // libera acesso de qualquer site/app
+  cors: { origin: '*' },
 });
 
 // ---------------------------------------------------------------------------
-// Banco de dados (SQLite em arquivo -> messages.db)
+// Banco de dados (SQLite)
 // ---------------------------------------------------------------------------
-// Em produção (Railway, Render, etc.) defina a variável de ambiente DB_PATH
-// apontando para o volume persistente, ex: DB_PATH=/data/messages.db
 const dbPath = process.env.DB_PATH || path.join(__dirname, 'messages.db');
 const db = new Database(dbPath);
 db.exec(`
@@ -28,7 +34,20 @@ db.exec(`
     content TEXT NOT NULL,
     delivered INTEGER DEFAULT 0,
     created_at TEXT DEFAULT (datetime('now'))
-  )
+  );
+
+  CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT UNIQUE NOT NULL,
+    password TEXT NOT NULL,
+    fullName TEXT,
+    maritalStatus TEXT,
+    address TEXT,
+    description TEXT,
+    sign TEXT,
+    age TEXT,
+    photo TEXT
+  );
 `);
 
 const insertMessage = db.prepare(`
@@ -63,7 +82,6 @@ function deliverMessage(from, to, content) {
     delivered: delivered ? 1 : 0,
   };
 
-  // Se o destinatário está online, entrega na hora via WebSocket
   if (delivered) {
     io.to(targetSocketId).emit('message', message);
   }
@@ -72,19 +90,16 @@ function deliverMessage(from, to, content) {
 }
 
 // ---------------------------------------------------------------------------
-// WebSocket (Socket.IO) — comunicação em tempo real
+// WebSocket (Socket.IO)
 // ---------------------------------------------------------------------------
 io.on('connection', (socket) => {
   let currentUser = null;
 
-  // O app do usuário deve chamar isso assim que conectar,
-  // informando o nome/id do usuário logado.
   socket.on('register', (username) => {
     currentUser = username;
     onlineUsers.set(username, socket.id);
     console.log(`[online] ${username}`);
 
-    // Entrega mensagens que chegaram enquanto ele estava offline
     const pending = getPending.all(username);
     pending.forEach((msg) => {
       socket.emit('message', msg);
@@ -92,7 +107,6 @@ io.on('connection', (socket) => {
     });
   });
 
-  // Envio de mensagem direto pelo WebSocket (alternativa ao POST /messages)
   socket.on('sendMessage', ({ from, to, content }) => {
     if (!from || !to || !content) return;
     deliverMessage(from, to, content);
@@ -107,10 +121,56 @@ io.on('connection', (socket) => {
 });
 
 // ---------------------------------------------------------------------------
-// Rotas REST (HTTP) — sem chave de API, uso livre
+// Rotas REST para Usuários (NOVO!)
 // ---------------------------------------------------------------------------
 
-// Envia uma mensagem: POST /messages  { from, to, content }
+// Criar ou Atualizar Perfil
+app.post('/users', (req, res) => {
+  const { username, password, fullName, maritalStatus, address, description, sign, age, photo } = req.body;
+  if (!username || !password) return res.status(400).json({ error: 'Usuário e senha obrigatórios' });
+
+  try {
+    const stmt = db.prepare(`
+      INSERT INTO users (username, password, fullName, maritalStatus, address, description, sign, age, photo)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(username) DO UPDATE SET
+      password=excluded.password, fullName=excluded.fullName, maritalStatus=excluded.maritalStatus,
+      address=excluded.address, description=excluded.description, sign=excluded.sign,
+      age=excluded.age, photo=excluded.photo
+    `);
+    stmt.run(username, password, fullName, maritalStatus, address, description, sign, age, photo);
+    res.status(200).json({ message: 'Perfil salvo com sucesso!' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Login
+app.post('/login', (req, res) => {
+  const { username, password } = req.body;
+  const user = db.prepare('SELECT * FROM users WHERE username = ? AND password = ?').get(username, password);
+  if (user) {
+    res.json({ success: true, user });
+  } else {
+    res.status(401).json({ success: false, message: 'Usuário ou senha inválidos' });
+  }
+});
+
+// Buscar todos os usuários (para o Live)
+app.get('/users', (req, res) => {
+  const currentUser = req.query.currentUser;
+  let users;
+  if (currentUser) {
+    users = db.prepare('SELECT * FROM users WHERE username != ?').all(currentUser);
+  } else {
+    users = db.prepare('SELECT * FROM users').all();
+  }
+  res.json(users);
+});
+
+// ---------------------------------------------------------------------------
+// Rotas de Mensagens
+// ---------------------------------------------------------------------------
 app.post('/messages', (req, res) => {
   const { from, to, content } = req.body;
   if (!from || !to || !content) {
@@ -120,24 +180,21 @@ app.post('/messages', (req, res) => {
   res.status(201).json(message);
 });
 
-// Histórico de conversa entre dois usuários: GET /messages/:userA/:userB
 app.get('/messages/:userA/:userB', (req, res) => {
   const { userA, userB } = req.params;
   const history = getHistory.all(userA, userB, userB, userA);
   res.json(history);
 });
 
-// Lista quem está online agora: GET /online
 app.get('/online', (req, res) => {
   res.json(Array.from(onlineUsers.keys()));
 });
 
-// Página de teste (public/index.html)
 app.get('/', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-  console.log(`API de mensagens rodando em http://localhost:${PORT}`);
+  console.log(`API rodando em http://localhost:${PORT}`);
 });
